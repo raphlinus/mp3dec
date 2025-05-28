@@ -1,3 +1,5 @@
+#![no_std]
+
 const MAX_SAMPLES_PER_FRAME: usize = 1152 * 2;
 
 #[derive(Default)]
@@ -27,6 +29,8 @@ const MAX_FREE_FORMAT_FRAME_SIZE: usize = 2304;
 const MAX_FRAME_SYNC_MATCHES: usize = 10;
 const MAX_L3_FRAME_PAYLOAD_BYTES: usize = MAX_FREE_FORMAT_FRAME_SIZE;
 const MAX_BITRESERVOIR_BYTES: usize = 511;
+const SHORT_BLOCK_TYPE: u8 = 2;
+const STOP_BLOCK_TYPE: u8 = 3;
 const HDR_SIZE: usize = 4;
 
 struct ScaleInfo {
@@ -38,13 +42,13 @@ struct ScaleInfo {
 }
 
 struct GrInfo {
-    sfbtab: &'static [u8; 40],
+    sfbtab: &'static [u8],
     part_23_length: u16,
     big_values: u16,
     scalefac_compress: u16,
     global_gain: u8,
     block_type: u8,
-    mixed_blog_flag: u8,
+    mixed_block_flag: u8, // maybe should be bool?
     n_long_sfb: u8,
     n_short_sfb: u8,
     table_select: [u8; 3],
@@ -160,6 +164,10 @@ impl Header {
 
     fn get_sample_rate(self) -> u8 {
         (self.0[2] >> 2) & 3
+    }
+
+    fn get_my_sample_rate(self) -> u8 {
+        self.get_sample_rate() + (((self.0[1] >> 3) & 1) + ((self.0[1] >> 4) & 1)) * 3
     }
 
     fn is_frame_576(self) -> bool {
@@ -380,3 +388,201 @@ fn mp3d_find_frame(mp3: &[u8], free_format_bytes: &mut usize) -> (usize, usize) 
     }
     (mp3.len(), 0)
 }
+
+const G_SCF_LONG: [[u8; 23]; 8] = [
+    [
+        6, 6, 6, 6, 6, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32, 38, 46, 52, 60, 68, 58, 54, 0,
+    ],
+    [
+        12, 12, 12, 12, 12, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64, 76, 90, 2, 2, 2, 2, 2, 0,
+    ],
+    [
+        6, 6, 6, 6, 6, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32, 38, 46, 52, 60, 68, 58, 54, 0,
+    ],
+    [
+        6, 6, 6, 6, 6, 6, 8, 10, 12, 14, 16, 18, 22, 26, 32, 38, 46, 54, 62, 70, 76, 36, 0,
+    ],
+    [
+        6, 6, 6, 6, 6, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32, 38, 46, 52, 60, 68, 58, 54, 0,
+    ],
+    [
+        4, 4, 4, 4, 4, 4, 6, 6, 8, 8, 10, 12, 16, 20, 24, 28, 34, 42, 50, 54, 76, 158, 0,
+    ],
+    [
+        4, 4, 4, 4, 4, 4, 6, 6, 6, 8, 10, 12, 16, 18, 22, 28, 34, 40, 46, 54, 54, 192, 0,
+    ],
+    [
+        4, 4, 4, 4, 4, 4, 6, 6, 8, 10, 12, 16, 20, 24, 30, 38, 46, 56, 68, 84, 102, 26, 0,
+    ],
+];
+const G_SCF_SHORT: [[u8; 40]; 8] = [
+    [
+        4, 4, 4, 4, 4, 4, 4, 4, 4, 6, 6, 6, 8, 8, 8, 10, 10, 10, 12, 12, 12, 14, 14, 14, 18, 18,
+        18, 24, 24, 24, 30, 30, 30, 40, 40, 40, 18, 18, 18, 0,
+    ],
+    [
+        8, 8, 8, 8, 8, 8, 8, 8, 8, 12, 12, 12, 16, 16, 16, 20, 20, 20, 24, 24, 24, 28, 28, 28, 36,
+        36, 36, 2, 2, 2, 2, 2, 2, 2, 2, 2, 26, 26, 26, 0,
+    ],
+    [
+        4, 4, 4, 4, 4, 4, 4, 4, 4, 6, 6, 6, 6, 6, 6, 8, 8, 8, 10, 10, 10, 14, 14, 14, 18, 18, 18,
+        26, 26, 26, 32, 32, 32, 42, 42, 42, 18, 18, 18, 0,
+    ],
+    [
+        4, 4, 4, 4, 4, 4, 4, 4, 4, 6, 6, 6, 8, 8, 8, 10, 10, 10, 12, 12, 12, 14, 14, 14, 18, 18,
+        18, 24, 24, 24, 32, 32, 32, 44, 44, 44, 12, 12, 12, 0,
+    ],
+    [
+        4, 4, 4, 4, 4, 4, 4, 4, 4, 6, 6, 6, 8, 8, 8, 10, 10, 10, 12, 12, 12, 14, 14, 14, 18, 18,
+        18, 24, 24, 24, 30, 30, 30, 40, 40, 40, 18, 18, 18, 0,
+    ],
+    [
+        4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 6, 6, 6, 8, 8, 8, 10, 10, 10, 12, 12, 12, 14, 14, 14,
+        18, 18, 18, 22, 22, 22, 30, 30, 30, 56, 56, 56, 0,
+    ],
+    [
+        4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 6, 6, 6, 6, 6, 6, 10, 10, 10, 12, 12, 12, 14, 14, 14,
+        16, 16, 16, 20, 20, 20, 26, 26, 26, 66, 66, 66, 0,
+    ],
+    [
+        4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 6, 6, 6, 8, 8, 8, 12, 12, 12, 16, 16, 16, 20, 20, 20,
+        26, 26, 26, 34, 34, 34, 42, 42, 42, 12, 12, 12, 0,
+    ],
+];
+const G_SCF_MIXED: [[u8; 40]; 8] = [
+    [
+        6, 6, 6, 6, 6, 6, 6, 6, 6, 8, 8, 8, 10, 10, 10, 12, 12, 12, 14, 14, 14, 18, 18, 18, 24, 24,
+        24, 30, 30, 30, 40, 40, 40, 18, 18, 18, 0, 0, 0, 0,
+    ],
+    [
+        12, 12, 12, 4, 4, 4, 8, 8, 8, 12, 12, 12, 16, 16, 16, 20, 20, 20, 24, 24, 24, 28, 28, 28,
+        36, 36, 36, 2, 2, 2, 2, 2, 2, 2, 2, 2, 26, 26, 26, 0,
+    ],
+    [
+        6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 8, 8, 8, 10, 10, 10, 14, 14, 14, 18, 18, 18, 26, 26,
+        26, 32, 32, 32, 42, 42, 42, 18, 18, 18, 0, 0, 0, 0,
+    ],
+    [
+        6, 6, 6, 6, 6, 6, 6, 6, 6, 8, 8, 8, 10, 10, 10, 12, 12, 12, 14, 14, 14, 18, 18, 18, 24, 24,
+        24, 32, 32, 32, 44, 44, 44, 12, 12, 12, 0, 0, 0, 0,
+    ],
+    [
+        6, 6, 6, 6, 6, 6, 6, 6, 6, 8, 8, 8, 10, 10, 10, 12, 12, 12, 14, 14, 14, 18, 18, 18, 24, 24,
+        24, 30, 30, 30, 40, 40, 40, 18, 18, 18, 0, 0, 0, 0,
+    ],
+    [
+        4, 4, 4, 4, 4, 4, 6, 6, 4, 4, 4, 6, 6, 6, 8, 8, 8, 10, 10, 10, 12, 12, 12, 14, 14, 14, 18,
+        18, 18, 22, 22, 22, 30, 30, 30, 56, 56, 56, 0, 0,
+    ],
+    [
+        4, 4, 4, 4, 4, 4, 6, 6, 4, 4, 4, 6, 6, 6, 6, 6, 6, 10, 10, 10, 12, 12, 12, 14, 14, 14, 16,
+        16, 16, 20, 20, 20, 26, 26, 26, 66, 66, 66, 0, 0,
+    ],
+    [
+        4, 4, 4, 4, 4, 4, 6, 6, 4, 4, 4, 6, 6, 6, 8, 8, 8, 12, 12, 12, 16, 16, 16, 20, 20, 20, 26,
+        26, 26, 34, 34, 34, 42, 42, 42, 12, 12, 12, 0, 0,
+    ],
+];
+
+// Returns -1 on failure; maybe Option would be more idiomatic
+fn l3_read_side_info(bs: &mut Bs, grs: &mut [GrInfo; 4], header: Header) -> isize {
+    let sr_idx = header.get_my_sample_rate().saturating_sub(1);
+    let mut gr_count = if header.is_mono() { 1 } else { 2 };
+
+    let mut scfsi = 0;
+    let main_data_begin = if header.test_mpeg1() {
+        gr_count *= 2;
+        let main_data_begin = bs.get_bits(9);
+        scfsi = bs.get_bits(7 + gr_count);
+        main_data_begin
+    } else {
+        bs.get_bits(8 + gr_count) >> gr_count
+    };
+
+    let mut part_23_sum = 0;
+    for gr in &mut grs[..gr_count] {
+        if header.is_mono() {
+            scfsi <<= 4;
+        }
+        gr.part_23_length = bs.get_bits(12) as u16;
+        part_23_sum += gr.part_23_length as usize;
+        gr.big_values = bs.get_bits(9) as u16;
+        if gr.big_values > 288 {
+            return -1;
+        }
+        gr.global_gain = bs.get_bits(8) as u8;
+        gr.scalefac_compress = bs.get_bits(if header.test_mpeg1() { 4 } else { 9 }) as u16;
+        gr.sfbtab = &G_SCF_LONG[sr_idx as usize];
+        gr.n_long_sfb = 22;
+        gr.n_short_sfb = 0;
+        let tables;
+        if bs.get_bits(1) != 0 {
+            gr.block_type = bs.get_bits(2) as u8;
+            if gr.block_type == 0 {
+                return -1;
+            }
+            gr.mixed_block_flag = bs.get_bits(1) as u8;
+            gr.region_count[0] = 7;
+            gr.region_count[1] = 255;
+            if gr.block_type == SHORT_BLOCK_TYPE {
+                scfsi &= 0xf0f;
+                if gr.mixed_block_flag == 0 {
+                    gr.region_count[0] = 8;
+                    gr.sfbtab = &G_SCF_SHORT[sr_idx as usize];
+                    gr.n_long_sfb = 0;
+                    gr.n_short_sfb = 39;
+                } else {
+                    gr.sfbtab = &G_SCF_MIXED[sr_idx as usize];
+                    gr.n_long_sfb = if header.test_mpeg1() { 8 } else { 6 };
+                    gr.n_short_sfb = 30;
+                }
+            }
+            tables = bs.get_bits(10) << 5;
+            gr.subblock_gain[0] = bs.get_bits(3) as u8;
+            gr.subblock_gain[1] = bs.get_bits(3) as u8;
+            gr.subblock_gain[2] = bs.get_bits(3) as u8;
+        } else {
+            gr.block_type = 0;
+            gr.mixed_block_flag = 0;
+            tables = bs.get_bits(15);
+            gr.region_count[0] = bs.get_bits(4) as u8;
+            gr.region_count[1] = bs.get_bits(3) as u8;
+            gr.region_count[2] = 255;
+        }
+        gr.table_select[0] = (tables >> 10) as u8;
+        gr.table_select[1] = (tables >> 5) as u8 & 31;
+        gr.table_select[2] = tables as u8 & 31;
+        gr.preflag = if header.test_mpeg1() {
+            bs.get_bits(1) as u8
+        } else {
+            (gr.scalefac_compress >= 500) as u8
+        };
+        gr.scalefac_scale = bs.get_bits(1) as u8;
+        gr.count1_table = bs.get_bits(1) as u8;
+        gr.scfsi = (scfsi >> 12) as u8 & 15;
+        scfsi <<= 4;
+    }
+    if part_23_sum + bs.pos > bs.limit + main_data_begin as usize * 8 {
+        return -1;
+    }
+    main_data_begin as isize
+}
+
+fn l3_ldexp_q2(mut y: f32, mut exp_q2: i32) -> f32 {
+    const G_EXPFRAC: [f32; 4] = [
+        9.31322575e-10,
+        7.83145814e-10,
+        6.58544508e-10,
+        5.53767716e-10,
+    ];
+    loop {
+        let e = exp_q2.min(30 * 4);
+        y *= G_EXPFRAC[(e & 3) as usize] * (1 << 30 >> (e >> 2)) as f32;
+        exp_q2 -= e;
+        if exp_q2 <= 0 {
+            return y;
+        }
+    }
+}
+
+impl GrInfo {}

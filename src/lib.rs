@@ -79,7 +79,7 @@ struct Scratch {
     gr_info: [GrInfo; 4],
     grbuf: [[f32; 576]; 2],
     scf: [f32; 40],
-    syn: [[f32; 2 * 32]; 18 + 15],
+    syn: [f32; 2 * 32 * (18 + 15)],
     ist_pos: [[u8; 39]; 2],
 }
 
@@ -581,7 +581,7 @@ fn l3_intensity_stereo_band(
     }
 }
 
-fn l3_stereo_top_band(right: &[f32], sfb: &[u8], nbands: usize) -> [usize; 3] {
+fn l3_stereo_top_band(right: &[f32; 576], sfb: &[u8], nbands: usize) -> [usize; 3] {
     let mut max_band = [!0; 3];
     let mut ix = 0;
     for i in 0..nbands {
@@ -603,7 +603,7 @@ fn l3_stereo_process(
     sfb: &[u8],
     hdr: Header,
     max_band: [usize; 3],
-    mpeg2_sh: isize,
+    mpeg2_sh: u16,
 ) {
     const G_PAN: [(f32, f32); 7] = [
         (0., 1.),
@@ -641,6 +641,39 @@ fn l3_stereo_process(
         }
         ix += n;
     }
+}
+
+fn l3_intensity_stereo(
+    left_right: &mut [[f32; 576]; 2],
+    ist_pos: &mut [u8],
+    gr: &[GrInfo],
+    header: Header,
+) {
+    let n_sfb = (gr[0].n_long_sfb + gr[0].n_short_sfb) as usize;
+    let max_blocks = if gr[0].n_short_sfb > 0 { 3 } else { 1 };
+
+    let mut max_band = l3_stereo_top_band(&left_right[1], &gr[0].sfbtab, n_sfb);
+    if gr[0].n_long_sfb > 0 {
+        max_band = [max_band[0].max(max_band[1]).max(max_band[2]); 3];
+    }
+    let default_pos = if header.test_mpeg1() { 3 } else { 0 };
+    for i in 0..max_blocks {
+        let itop = n_sfb - max_blocks + i;
+        let prev = itop - max_blocks;
+        ist_pos[itop] = if max_band[i] >= prev {
+            default_pos
+        } else {
+            ist_pos[prev]
+        };
+    }
+    l3_stereo_process(
+        left_right,
+        ist_pos,
+        &gr[0].sfbtab,
+        header,
+        max_band,
+        gr[1].scalefac_compress & 1,
+    );
 }
 
 fn l3_dct_9(y: &mut [f32; 9]) {
@@ -838,9 +871,9 @@ impl Decoder {
         info.hz = header.sample_rate_hz();
         info.layer = 4 - header.get_layer() as usize;
         info.bitrate_kbps = header.bitrate_kbps();
-        if pcm.is_none() {
+        let Some(pcm) = pcm else {
             return header.frame_samples();
-        }
+        };
         let bs_buf = &mp3[i..][..frame_size][HDR_SIZE..];
         let mut bs_core = BsCore::new(bs_buf.len());
         let mut bs_frame = Bs::new(bs_buf, &mut bs_core);
@@ -860,7 +893,14 @@ impl Decoder {
                 for igr in 0..n_gr {
                     scratch.grbuf = [[0.0; 576]; 2];
                     self.l3_decode(&mut scratch, igr * info.channels, info.channels);
-                    // TODO: mp3d_synth_granule
+                    mp3d_synth_granule(
+                        &mut self.qmf_state,
+                        &mut scratch.grbuf,
+                        18,
+                        info.channels,
+                        pcm,
+                        &mut scratch.syn,
+                    );
                 }
             }
             self.save_reservoir(&scratch);
@@ -891,6 +931,16 @@ impl Decoder {
                 &scratch.scf,
                 layer3gr_limit,
             );
+        }
+        if self.header.test_i_stereo() {
+            l3_intensity_stereo(
+                &mut scratch.grbuf,
+                &mut scratch.ist_pos[1],
+                &scratch.gr_info[igr..],
+                self.header,
+            );
+        } else if self.header.is_ms_stereo() {
+            l3_midside_stereo(&mut scratch.grbuf, 0, 576);
         }
         todo!()
     }
@@ -1271,7 +1321,7 @@ fn l3_decode_scalefactors(
     } else if gr.preflag {
         const G_PREAMP: [u8; 10] = [1, 1, 1, 1, 2, 2, 3, 3, 3, 2];
         for i in 0..10 {
-            iscf[11 + i] = G_PREAMP[i];
+            iscf[11 + i] += G_PREAMP[i];
         }
     }
 
@@ -1282,6 +1332,10 @@ fn l3_decode_scalefactors(
     for i in 0..(gr.n_long_sfb + gr.n_short_sfb) as usize {
         scf[i] = l3_ldexp_q2(gain, (iscf[i] as i32) << scf_shift);
     }
+}
+
+fn mp3d_dct_ii(grbuf: &mut [f32; 576], n: usize) {
+    todo!()
 }
 
 fn mp3d_scale_pcm(sample: f32) -> Sample {
@@ -1393,4 +1447,33 @@ fn mp3d_synth(grbuf: &[[f32; 576]], dstl: &mut [Sample], nch: usize, lins: &mut 
         dstl[(47 - i) * nch] = mp3d_scale_pcm(a[2]);
         dstl[(49 + i) * nch] = mp3d_scale_pcm(b[2]);
     }
+}
+
+fn mp3d_synth_granule(
+    qmf_state: &mut [f32; 15 * 64],
+    grbuf: &mut [[f32; 576]; 2],
+    nbands: usize,
+    nch: usize,
+    pcm: &mut [Sample],
+    lins: &mut [f32],
+) {
+    for gr in &mut grbuf[..nch] {
+        mp3d_dct_ii(gr, nbands);
+    }
+
+    lins[..15 * 64].copy_from_slice(qmf_state);
+    for i in (0..nbands).step_by(2) {
+        mp3d_synth(
+            &grbuf[i..],
+            &mut pcm[32 * nch * i..],
+            nch,
+            &mut lins[i * 64..],
+        );
+    }
+    if nch == 1 {
+        for i in (0..15 * 64).step_by(2) {
+            qmf_state[i] = lins[nbands * 64 + i];
+        }
+    }
+    qmf_state.copy_from_slice(&lins[nbands * 64..][..15 * 64]);
 }

@@ -50,7 +50,7 @@ struct ScaleInfo {
     scfcod: [u8; 64],
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct GrInfo {
     sfbtab: &'static [u8],
     part_23_length: u16,
@@ -225,9 +225,9 @@ impl Header {
 
     fn frame_bytes(self, free_format_size: usize) -> usize {
         let mut frame_bytes =
-            self.frame_samples() * self.bitrate_kbps() * 124 / self.sample_rate_hz();
+            self.frame_samples() * self.bitrate_kbps() * 125 / self.sample_rate_hz();
         if self.is_layer_1() {
-            frame_bytes &= !3
+            frame_bytes &= !3;
         }
         if frame_bytes > 0 {
             frame_bytes
@@ -530,7 +530,7 @@ fn l3_huffman(dst: &mut [f32], bs: &mut Bs, gr: &GrInfo, scf: &[f32], layer3gr_l
         &TAB32[..]
     };
 
-    loop {
+    'outer: loop {
         let mut leaf = codebook_count1[cache.peek_bits(4) as usize];
         if (leaf & 8) == 0 {
             let ix = (leaf >> 3) as u32 + cache.cache << 4 >> (32 - (leaf & 3));
@@ -546,7 +546,7 @@ fn l3_huffman(dst: &mut [f32], bs: &mut Bs, gr: &GrInfo, scf: &[f32], layer3gr_l
                 np = (sfb[sfb_ix] / 2) as isize;
                 sfb_ix += 1;
                 if np == 0 {
-                    break;
+                    break 'outer;
                 }
                 one = scf[scf_ix];
                 scf_ix += 1;
@@ -914,6 +914,9 @@ impl Decoder {
         self.reserv >= main_data_begin
     }
 
+    /// Decode one frame.
+    ///
+    /// Return value is the number of samples decoded.
     pub fn decode_frame(
         &mut self,
         mp3: &[u8],
@@ -980,7 +983,7 @@ impl Decoder {
                         &mut scratch.grbuf,
                         18,
                         info.channels,
-                        pcm,
+                        &mut pcm[igr * 576 * info.channels..],
                         &mut scratch.syn,
                     );
                 }
@@ -1029,14 +1032,14 @@ impl Decoder {
             let gr = &scratch.gr_info[igr + ch];
             let grbuf = &mut scratch.grbuf[ch];
             let n_long_bands = if !gr.mixed_block_flag {
-                0
+                0usize
             } else if self.header.get_my_sample_rate() == 2 {
                 4
             } else {
                 2
             };
             if gr.n_short_sfb != 0 {
-                aa_bands = n_long_bands - 1;
+                aa_bands = n_long_bands.saturating_sub(1);
                 let sfb = &gr.sfbtab[gr.n_long_sfb as usize..];
                 l3_reorder(&mut grbuf[n_long_bands * 18..], &mut scratch.syn, sfb);
             }
@@ -1075,7 +1078,7 @@ fn mp3d_match_frame(mp3: &[u8], frame_bytes: usize) -> bool {
         if i + HDR_SIZE > mp3.len() {
             return nmatch > 0;
         }
-        if !header.compare(this) {
+        if !header.compare(Header::new(&mp3[i..])) {
             return false;
         }
     }
@@ -1413,7 +1416,7 @@ fn l3_decode_scalefactors(
             sfc -= modprod;
             k += 4;
         }
-        scf_partition_ix = k;
+        scf_partition_ix += k;
         scfsi = -16;
     }
     l3_read_scalefactors(
@@ -1479,7 +1482,7 @@ fn mp3d_dct_ii(grbuf: &mut [f32; 576], n: usize) {
             x0 += x7;
             x7 = x1 - x6;
             x1 += x6;
-            x6 = x2 - x6;
+            x6 = x2 - x5;
             x2 += x5;
             x5 = x3 - x4;
             x3 += x4;
@@ -1547,7 +1550,7 @@ fn mp3d_synth_pair(pcm: &mut [Sample], nch: usize, z: &[f32]) {
     pcm[16 * nch] = mp3d_scale_pcm(a);
 }
 
-fn mp3d_synth(grbuf: &[[f32; 576]], dstl: &mut [Sample], nch: usize, lins: &mut [f32]) {
+fn mp3d_synth(grbuf: &[[f32; 576]; 2], band: usize, dstl: &mut [Sample], nch: usize, lins: &mut [f32]) {
     const G_WIN: &[f32] = &[
         -1., 26., -31., 208., 218., 401., -519., 2063., 2000., 4788., -5517., 7134., 5959., 35640.,
         -39336., 74992., -1., 24., -35., 202., 222., 347., -581., 2080., 1952., 4425., -5879.,
@@ -1571,15 +1574,15 @@ fn mp3d_synth(grbuf: &[[f32; 576]], dstl: &mut [Sample], nch: usize, lins: &mut 
     ];
     let right_ix = nch - 1;
     const Z_OFF: usize = 15 * 64;
-    lins[Z_OFF + 4 * 15] = grbuf[0][18 * 16];
-    lins[Z_OFF + 4 * 15 + 1] = grbuf[right_ix][18 * 16];
-    lins[Z_OFF + 4 * 15 + 2] = grbuf[0][0];
-    lins[Z_OFF + 4 * 15 + 3] = grbuf[right_ix][0];
+    lins[Z_OFF + 4 * 15] = grbuf[0][18 * 16 + band];
+    lins[Z_OFF + 4 * 15 + 1] = grbuf[right_ix][18 * 16 + band];
+    lins[Z_OFF + 4 * 15 + 2] = grbuf[0][band];
+    lins[Z_OFF + 4 * 15 + 3] = grbuf[right_ix][band];
 
-    lins[Z_OFF + 4 * 31] = grbuf[0][1 + 18 * 16];
-    lins[Z_OFF + 4 * 31 + 1] = grbuf[right_ix][1 + 18 * 16];
-    lins[Z_OFF + 4 * 31 + 2] = grbuf[0][1];
-    lins[Z_OFF + 4 * 31 + 3] = grbuf[right_ix][1];
+    lins[Z_OFF + 4 * 31] = grbuf[0][1 + 18 * 16 + band];
+    lins[Z_OFF + 4 * 31 + 1] = grbuf[right_ix][1 + 18 * 16 + band];
+    lins[Z_OFF + 4 * 31 + 2] = grbuf[0][1 + band];
+    lins[Z_OFF + 4 * 31 + 3] = grbuf[right_ix][1 + band];
 
     mp3d_synth_pair(&mut dstl[right_ix..], nch, &lins[4 * 15 + 1..]);
     mp3d_synth_pair(
@@ -1588,18 +1591,18 @@ fn mp3d_synth(grbuf: &[[f32; 576]], dstl: &mut [Sample], nch: usize, lins: &mut 
         &lins[4 * 15 + 64 + 1..],
     );
     mp3d_synth_pair(dstl, nch, &lins[4 * 15..]);
-    mp3d_synth_pair(&mut dstl[32 * nch..], nch, &lins[4 * 15 * 64..]);
+    mp3d_synth_pair(&mut dstl[32 * nch..], nch, &lins[4 * 15 + 64..]);
 
     for i in (0..15).rev() {
         let ix = Z_OFF + 4 * i;
-        lins[ix] = grbuf[0][18 * (31 - i)];
-        lins[ix + 1] = grbuf[right_ix][18 * (31 - i)];
-        lins[ix + 2] = grbuf[0][1 + 18 * (31 - i)];
-        lins[ix + 3] = grbuf[right_ix][1 + 18 * (31 - i)];
-        lins[ix + 64] = grbuf[0][1 + 18 * (1 + i)];
-        lins[ix + 65] = grbuf[right_ix][1 + 18 * (1 + i)];
-        lins[ix - 62] = grbuf[0][18 * (1 + i)];
-        lins[ix - 61] = grbuf[right_ix][18 * (1 + i)];
+        lins[ix] = grbuf[0][18 * (31 - i) + band];
+        lins[ix + 1] = grbuf[right_ix][18 * (31 - i) + band];
+        lins[ix + 2] = grbuf[0][1 + 18 * (31 - i) + band];
+        lins[ix + 3] = grbuf[right_ix][1 + 18 * (31 - i) + band];
+        lins[ix + 64] = grbuf[0][1 + 18 * (1 + i) + band];
+        lins[ix + 65] = grbuf[right_ix][1 + 18 * (1 + i) + band];
+        lins[ix - 62] = grbuf[0][18 * (1 + i) + band];
+        lins[ix - 61] = grbuf[right_ix][18 * (1 + i) + band];
         let mut a = [0.0; 4];
         let mut b = [0.0; 4];
         for k in 0..4 {
@@ -1645,7 +1648,8 @@ fn mp3d_synth_granule(
     lins[..15 * 64].copy_from_slice(qmf_state);
     for i in (0..nbands).step_by(2) {
         mp3d_synth(
-            &grbuf[i..],
+            grbuf,
+            i,
             &mut pcm[32 * nch * i..],
             nch,
             &mut lins[i * 64..],

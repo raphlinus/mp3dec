@@ -40,6 +40,8 @@ const BITS_DEQUANTIZER_OUT: i32 = -1;
 const MAX_SCF: i32 = 255 + BITS_DEQUANTIZER_OUT * 4 - 210;
 const MAX_SCFI: i32 = (MAX_SCF + 3) & !3;
 
+// This is only used for Layer 1/2
+#[expect(unused)]
 struct ScaleInfo {
     scf: [f32; 3 * 64],
     total_bands: u8,
@@ -48,6 +50,7 @@ struct ScaleInfo {
     scfcod: [u8; 64],
 }
 
+#[derive(Default)]
 struct GrInfo {
     sfbtab: &'static [u8],
     part_23_length: u16,
@@ -55,7 +58,7 @@ struct GrInfo {
     scalefac_compress: u16,
     global_gain: u8,
     block_type: u8,
-    mixed_block_flag: u8, // maybe should be bool?
+    mixed_block_flag: bool,
     n_long_sfb: u8,
     n_short_sfb: u8,
     table_select: [u8; 3],
@@ -67,6 +70,8 @@ struct GrInfo {
     scfsi: u8,
 }
 
+// This is only used for Layer 1/2
+#[expect(unused)]
 struct SubbandAlloc {
     tab_offset: u8,
     code_tab_width: u8,
@@ -131,11 +136,14 @@ impl Header {
     fn test_ms_stereo(self) -> bool {
         self.0[3] & 0x20 != 0
     }
-
+    // This is only used for Layer 1/2
+    #[expect(unused)]
     fn get_stereo_mode(self) -> u8 {
         (self.0[3] >> 6) & 3
     }
 
+    // This is only used for Layer 1/2
+    #[expect(unused)]
     fn get_stereo_mode_ext(self) -> u8 {
         (self.0[3] >> 4) & 3
     }
@@ -676,6 +684,47 @@ fn l3_intensity_stereo(
     );
 }
 
+fn l3_reorder(grbuf: &mut [f32], scratch: &mut [f32], sfb: &[u8]) {
+    let mut src_ix = 0;
+    let mut dst_ix = 0;
+    for sfb_ix in (0..sfb.len()).step_by(3) {
+        let len = sfb[sfb_ix] as usize;
+        if len == 0 {
+            break;
+        }
+        for _ in 0..len {
+            scratch[dst_ix] = grbuf[src_ix];
+            scratch[dst_ix + 1] = grbuf[src_ix + len];
+            scratch[dst_ix + 2] = grbuf[src_ix + 2 * len];
+            src_ix += 1;
+            dst_ix += 3;
+        }
+        src_ix += 2 * len;
+    }
+    grbuf[0..dst_ix].copy_from_slice(&scratch[0..dst_ix]);
+}
+
+fn l3_antialias(grbuf: &mut [f32; 576], nbands: usize) {
+    const G_AA: [[f32; 8]; 2] = [
+        [
+            0.85749293, 0.88174200, 0.94962865, 0.98331459, 0.99551782, 0.99916056, 0.99989920,
+            0.99999316,
+        ],
+        [
+            0.51449576, 0.47173197, 0.31337745, 0.18191320, 0.09457419, 0.04096558, 0.01419856,
+            0.00369997,
+        ],
+    ];
+    for band in 0..nbands {
+        for i in 0..8 {
+            let u = grbuf[band * 18 + 18 + i];
+            let d = grbuf[band * 18 + 17 - i];
+            grbuf[band * 18 + 18 + i] = u * G_AA[0][i] - d * G_AA[1][i];
+            grbuf[band * 18 + 17 - i] = u * G_AA[1][i] + d * G_AA[0][i];
+        }
+    }
+}
+
 fn l3_dct_9(y: &mut [f32; 9]) {
     let mut s0 = y[0];
     let mut s2 = y[2];
@@ -791,7 +840,15 @@ fn l3_imdct_short(grbuf: &mut [f32], overlap: &mut [f32], nbands: usize) {
     }
 }
 
-fn l3_imdct_gr(grbuf: &mut [f32], overlap: &mut [f32], block_type: u8, n_long_bands: usize) {
+fn l3_change_sign(grbuf: &mut [f32; 576]) {
+    for j in (18..576).step_by(36) {
+        for i in (1..18).step_by(2) {
+            grbuf[i + j] = -grbuf[i + j];
+        }
+    }
+}
+
+fn l3_imdct_gr(grbuf: &mut [f32; 576], overlap: &mut [f32], block_type: u8, n_long_bands: usize) {
     const G_MDCT_WINDOW: [[f32; 18]; 2] = [
         [
             0.99904822, 0.99144486, 0.97629601, 0.95371695, 0.92387953, 0.88701083, 0.84339145,
@@ -828,7 +885,7 @@ impl Decoder {
         }
     }
 
-    fn save_reservoir(&mut self, scratch: &Scratch) {
+    fn l3_save_reservoir(&mut self, scratch: &Scratch) {
         let mut pos = scratch.bs.pos.div_ceil(8);
         let mut remains = scratch.bs.limit / 8 - pos;
         if remains > MAX_BITRESERVOIR_BYTES {
@@ -928,7 +985,7 @@ impl Decoder {
                     );
                 }
             }
-            self.save_reservoir(&scratch);
+            self.l3_save_reservoir(&scratch);
             success as usize * self.header.frame_samples()
         } else {
             // optional TODO: implement level 1 & 2
@@ -967,13 +1024,45 @@ impl Decoder {
         } else if self.header.is_ms_stereo() {
             l3_midside_stereo(&mut scratch.grbuf, 0, 576);
         }
-        todo!()
+        for ch in 0..nch {
+            let mut aa_bands = 31;
+            let gr = &scratch.gr_info[igr + ch];
+            let grbuf = &mut scratch.grbuf[ch];
+            let n_long_bands = if !gr.mixed_block_flag {
+                0
+            } else if self.header.get_my_sample_rate() == 2 {
+                4
+            } else {
+                2
+            };
+            if gr.n_short_sfb != 0 {
+                aa_bands = n_long_bands - 1;
+                let sfb = &gr.sfbtab[gr.n_long_sfb as usize..];
+                l3_reorder(&mut grbuf[n_long_bands * 18..], &mut scratch.syn, sfb);
+            }
+            l3_antialias(grbuf, aa_bands);
+            l3_imdct_gr(
+                grbuf,
+                &mut self.mdct_overlap[ch],
+                gr.block_type,
+                n_long_bands,
+            );
+            l3_change_sign(grbuf);
+        }
     }
 }
 
 impl Default for Scratch {
     fn default() -> Self {
-        todo!()
+        Scratch {
+            bs: Default::default(),
+            maindata: [0; _],
+            gr_info: Default::default(),
+            grbuf: [[0.0; 576]; 2],
+            scf: [0.0; _],
+            syn: [0.0; _],
+            ist_pos: [[0; _]; _],
+        }
     }
 }
 
@@ -1170,12 +1259,12 @@ fn l3_read_side_info(bs: &mut Bs, grs: &mut [GrInfo; 4], header: Header) -> usiz
             if gr.block_type == 0 {
                 return L3_ERROR;
             }
-            gr.mixed_block_flag = bs.get_bits(1) as u8;
+            gr.mixed_block_flag = bs.get_bits(1) != 0;
             gr.region_count[0] = 7;
             gr.region_count[1] = 255;
             if gr.block_type == SHORT_BLOCK_TYPE {
                 scfsi &= 0xf0f;
-                if gr.mixed_block_flag == 0 {
+                if !gr.mixed_block_flag {
                     gr.region_count[0] = 8;
                     gr.sfbtab = &G_SCF_SHORT[sr_idx as usize];
                     gr.n_long_sfb = 0;
@@ -1192,7 +1281,7 @@ fn l3_read_side_info(bs: &mut Bs, grs: &mut [GrInfo; 4], header: Header) -> usiz
             gr.subblock_gain[2] = bs.get_bits(3) as u8;
         } else {
             gr.block_type = 0;
-            gr.mixed_block_flag = 0;
+            gr.mixed_block_flag = false;
             tables = bs.get_bits(15);
             gr.region_count[0] = bs.get_bits(4) as u8;
             gr.region_count[1] = bs.get_bits(3) as u8;
@@ -1360,10 +1449,77 @@ fn l3_decode_scalefactors(
 }
 
 fn mp3d_dct_ii(grbuf: &mut [f32; 576], n: usize) {
-    todo!()
+    const G_SEC: [f32; 24] = [10.19000816,0.50060302,0.50241929,3.40760851,0.50547093,0.52249861,2.05778098,0.51544732,0.56694406,1.48416460,0.53104258,0.64682180,1.16943991,0.55310392,0.78815460,0.97256821,0.58293498,1.06067765,0.83934963,0.62250412,1.72244716,0.74453628,0.67480832,5.10114861];
+    let mut t: [[f32; 8]; 4] = [[0.0; 8]; 4];
+    for k in 0..n {
+        for i in 0..8 {
+            let x0 = grbuf[k + i * 18];
+            let x1 = grbuf[k + (15 - i) * 18];
+            let x2 = grbuf[k + (16 + i) * 18];
+            let x3 = grbuf[k + (31 - i) * 18];
+            let t0 = x0 + x3;
+            let t1 = x1 + x2;
+            let t2 = (x1 - x2) * G_SEC[3 * i];
+            let t3 = (x0 - x3) * G_SEC[3 * i + 1];
+            t[0][i] = t0 + t1;
+            t[1][i] = (t0 - t1) * G_SEC[3 * i + 2];
+            t[2][i] = t3 + t2;
+            t[3][i] = (t3 - t2) * G_SEC[3 * i + 2];
+        }
+        for i in 0..4 {
+            let mut x0 = t[i][0];
+            let mut x1 = t[i][1];
+            let mut x2 = t[i][2];
+            let mut x3 = t[i][3];
+            let mut x4 = t[i][4];
+            let mut x5 = t[i][5];
+            let mut x6 = t[i][6];
+            let mut x7 = t[i][7];
+            let mut xt = x0 - x7;
+            x0 += x7;
+            x7 = x1 - x6;
+            x1 += x6;
+            x6 = x2 - x6;
+            x2 += x5;
+            x5 = x3 - x4;
+            x3 += x4;
+            x4 = x0 - x3;
+            x0 += x3;
+            x2 = x1 - x2;
+            x1 += x2;
+            t[i][0] = x0 + x1;
+            t[i][4] = (x0 - x1) * 0.70710677;
+            x5 += x6;
+            x6 = (x6 + x7) * 0.70710677;
+            x7 += xt;
+            x3 = (x3 + x4) * 0.70710677;
+            x5 -= x7 * 0.198912367;
+            x7 += x5 * 0.382683432;
+            x5 -= x7 * 0.198912367;
+            x0 = xt - x6;
+            xt += x6;
+            t[i][1] = (xt + x7) * 0.50979561;
+            t[i][2] = (x4 + x3) * 0.54119611;
+            t[i][3] = (x0 - x5) * 0.60134488;
+            t[i][5] = (x0 + x5) * 0.89997619;
+            t[i][6] = (x4 - x3) * 1.30656302;
+            t[i][7] = (xt - x7) * 2.56291556;
+        }
+        for i in 0..7 {
+            grbuf[(i * 4) * 18 + k] = t[0][i];
+            grbuf[(i * 4 + 1) * 18 + k] = t[2][i] + t[3][i] + t[3][i + 1];
+            grbuf[(i * 4 + 2) * 18 + k] = t[1][i] + t[1][i + 1];
+            grbuf[(i * 4 + 3) * 18 + k] = t[2][i + 1] + t[3][i] + t[3][i + 1];
+        }
+        grbuf[28 * 18 + k] = t[0][7];
+        grbuf[29 * 18 + k] = t[2][7] + t[3][7];
+        grbuf[30 * 18 + k] = t[1][7];
+        grbuf[31 * 18 + k] = t[3][7];
+    }
 }
 
 fn mp3d_scale_pcm(sample: f32) -> Sample {
+    // Note: when core_float_math lands, switch to round
     // Should be correct for [-1.5..-0.5], where minimp3 produces 0
     let y = sample.clamp(-32767.5, 32766.5) + 0.5;
     (y as i16) - (y < 0.) as i16
@@ -1499,6 +1655,7 @@ fn mp3d_synth_granule(
         for i in (0..15 * 64).step_by(2) {
             qmf_state[i] = lins[nbands * 64 + i];
         }
+    } else {
+        qmf_state.copy_from_slice(&lins[nbands * 64..][..15 * 64]);
     }
-    qmf_state.copy_from_slice(&lins[nbands * 64..][..15 * 64]);
 }

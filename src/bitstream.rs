@@ -23,15 +23,6 @@ impl<'a> Bs<'a> {
     pub fn get_bits(&mut self, n: usize) -> u32 {
         self.core.get_bits(self.buf, n)
     }
-
-    fn peek_bits(&self, cache: u32, n: usize) -> u32 {
-        cache >> (32 - n)
-    }
-
-    fn flush_bits(&self, cache: &mut u32, bs_sh: &mut isize, n: usize) {
-        *cache <<= n;
-        *bs_sh += n as isize;
-    }
 }
 
 impl BsCore {

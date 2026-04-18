@@ -983,7 +983,7 @@ impl Decoder {
                         &mut scratch.grbuf,
                         18,
                         info.channels,
-                        &mut pcm[igr * 576 * info.channels..],
+                        &mut pcm[igr * info.channels * 576..],
                         &mut scratch.syn,
                     );
                 }
@@ -1328,7 +1328,7 @@ fn l3_read_scalefactors(
             scf[ix..][..cnt].copy_from_slice(&ist_pos[ix..][..cnt]);
         } else {
             let bits = scf_size[i];
-            if bits != 0 {
+            if bits == 0 {
                 scf[ix..][..cnt].fill(0);
                 ist_pos[ix..][..cnt].fill(0);
             } else {

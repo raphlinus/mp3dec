@@ -35,14 +35,14 @@ impl BsCore {
 
     pub fn get_bits(&mut self, buf: &[u8], n: usize) -> u32 {
         let s = self.pos % 8;
-        let mut shl = n + s;
+        let mut ix = self.pos / 8;
         self.pos += n;
         if self.pos > self.limit {
             return 0;
         }
         let mut cache = 0;
-        let mut ix = self.pos / 8;
         let mut next = buf[ix] as u32 & (0xff >> s);
+        let mut shl = n + s;
         while shl > 8 {
             shl -= 8;
             cache |= next << shl;

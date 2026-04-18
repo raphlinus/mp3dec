@@ -791,6 +791,31 @@ fn l3_imdct_short(grbuf: &mut [f32], overlap: &mut [f32], nbands: usize) {
     }
 }
 
+fn l3_imdct_gr(grbuf: &mut [f32], overlap: &mut [f32], block_type: u8, n_long_bands: usize) {
+    const G_MDCT_WINDOW: [[f32; 18]; 2] = [
+        [
+            0.99904822, 0.99144486, 0.97629601, 0.95371695, 0.92387953, 0.88701083, 0.84339145,
+            0.79335334, 0.73727734, 0.04361938, 0.13052619, 0.21643961, 0.30070580, 0.38268343,
+            0.46174861, 0.53729961, 0.60876143, 0.67559021,
+        ],
+        [
+            1., 1., 1., 1., 1., 1., 0.99144486, 0.92387953, 0.79335334, 0., 0., 0., 0., 0., 0.,
+            0.13052619, 0.38268343, 0.60876143,
+        ],
+    ];
+    if n_long_bands > 0 {
+        l3_imdct36(grbuf, overlap, &G_MDCT_WINDOW[0], n_long_bands);
+    }
+    let gr_slice = &mut grbuf[18 * n_long_bands..];
+    let overlap_slice = &mut overlap[9 * n_long_bands..];
+    if block_type == SHORT_BLOCK_TYPE {
+        l3_imdct_short(gr_slice, overlap_slice, 32 - n_long_bands);
+    } else {
+        let window = &G_MDCT_WINDOW[(block_type == STOP_BLOCK_TYPE) as usize];
+        l3_imdct36(gr_slice, overlap_slice, window, 32 - n_long_bands);
+    }
+}
+
 impl Decoder {
     pub fn new() -> Self {
         Decoder {

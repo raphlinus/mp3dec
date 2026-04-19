@@ -1,6 +1,21 @@
-#![no_std]
+#![cfg_attr(all(not(feature = "dump"), not(test)), no_std)]
 
 mod bitstream;
+#[cfg(feature = "dump")]
+mod dump;
+
+#[cfg(feature = "dump")]
+macro_rules! dump {
+    ($name: expr, $grbuf: expr) => {
+        crate::dump::dump($name, $grbuf);
+    };
+}
+
+#[cfg(not(feature = "dump"))]
+macro_rules! dump {
+    ($name: expr, $grbuf: expr) => {
+    };
+}
 
 use bitstream::{Bs, BsCache, BsCore};
 
@@ -1016,6 +1031,7 @@ impl Decoder {
                 &scratch.scf,
                 layer3gr_limit,
             );
+            dump!("huffman", &scratch.grbuf[ch]);
         }
         if self.header.test_i_stereo() {
             l3_intensity_stereo(
@@ -1024,8 +1040,11 @@ impl Decoder {
                 &scratch.gr_info[igr..],
                 self.header,
             );
+            dump!("i_stereo", &scratch.grbuf[0]);
         } else if self.header.is_ms_stereo() {
             l3_midside_stereo(&mut scratch.grbuf, 0, 576);
+            dump!("ms_stereo_l", &scratch.grbuf[0]);
+            dump!("ms_stereo_r", &scratch.grbuf[1]);
         }
         for ch in 0..nch {
             let mut aa_bands = 31;
@@ -1042,15 +1061,19 @@ impl Decoder {
                 aa_bands = n_long_bands.saturating_sub(1);
                 let sfb = &gr.sfbtab[gr.n_long_sfb as usize..];
                 l3_reorder(&mut grbuf[n_long_bands * 18..], &mut scratch.syn, sfb);
+                dump!("reorder", grbuf);
             }
             l3_antialias(grbuf, aa_bands);
+            dump!("antialias", grbuf);
             l3_imdct_gr(
                 grbuf,
                 &mut self.mdct_overlap[ch],
                 gr.block_type,
                 n_long_bands,
             );
+            dump!("imdct", grbuf);
             l3_change_sign(grbuf);
+            dump!("change_sign", grbuf);
         }
     }
 }
@@ -1352,14 +1375,11 @@ fn l3_ldexp_q2(mut y: f32, mut exp_q2: i32) -> f32 {
         6.58544508e-10,
         5.53767716e-10,
     ];
-    loop {
-        let e = exp_q2.min(30 * 4);
-        y *= G_EXPFRAC[(e & 3) as usize] * (1 << 30 >> (e >> 2)) as f32;
-        exp_q2 -= e;
-        if exp_q2 <= 0 {
-            return y;
-        }
+    while exp_q2 >= 30 * 4 {
+        y *= 1.0 / (1 << 30) as f32;
+        exp_q2 -= 30 * 4;
     }
+    y * G_EXPFRAC[(exp_q2 & 3) as usize] * (1 << 30 >> (exp_q2 >> 2)) as f32
 }
 
 fn l3_decode_scalefactors(

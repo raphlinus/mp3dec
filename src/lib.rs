@@ -442,7 +442,7 @@ fn l3_huffman(dst: &mut [f32], bs: &mut Bs, gr: &GrInfo, scf: &[f32], layer3gr_l
         11, 13,
     ];
     let mut big_val_cnt = gr.big_values as isize;
-    let sfb = &gr.sfbtab;
+    let sfb = gr.sfbtab;
     let mut sfb_ix = 0;
     let mut scf_ix = 0;
     let mut dst_ix = 0;
@@ -456,8 +456,9 @@ fn l3_huffman(dst: &mut [f32], bs: &mut Bs, gr: &GrInfo, scf: &[f32], layer3gr_l
         ireg += 1;
         let codebook_ix = TABINDEX[tab_num] as usize;
         let linbits = G_LINBITS[tab_num];
+        dump!("linbits", &[linbits as f32, sfb_cnt as f32]);
         if linbits > 0 {
-            for _ in 0..sfb_cnt {
+            for _ in 0..=sfb_cnt {
                 let np = (sfb[sfb_ix] / 2) as isize;
                 sfb_ix += 1;
                 let pairs_to_decode = big_val_cnt.min(np);
@@ -481,9 +482,11 @@ fn l3_huffman(dst: &mut [f32], bs: &mut Bs, gr: &GrInfo, scf: &[f32], layer3gr_l
                             cache.check_bits(bs);
                             let sign = if cache.peek_bit() { -1. } else { 1. };
                             dst[dst_ix] = one * l3_pow_43(lsb_sum) * sign;
+                            dump!("dst1", &dst[dst_ix..][..1]);
                         } else {
                             dst[dst_ix] =
                                 G_POW43[16 + lsb as usize - 16 * cache.peek_bit() as usize] * one;
+                            dump!("dst2", &dst[dst_ix..][..1]);
                         }
                         cache.flush_bits((lsb > 0) as usize);
                         dst_ix += 1;
@@ -497,7 +500,7 @@ fn l3_huffman(dst: &mut [f32], bs: &mut Bs, gr: &GrInfo, scf: &[f32], layer3gr_l
                 }
             }
         } else {
-            for _ in 0..sfb_cnt {
+            for _ in 0..=sfb_cnt {
                 let np = (sfb[sfb_ix] / 2) as isize;
                 sfb_ix += 1;
                 let pairs_to_decode = big_val_cnt.min(np);
@@ -517,6 +520,7 @@ fn l3_huffman(dst: &mut [f32], bs: &mut Bs, gr: &GrInfo, scf: &[f32], layer3gr_l
                         let lsb = leaf & 0x0f;
                         dst[dst_ix] =
                             G_POW43[16 + lsb as usize - 16 * cache.peek_bit() as usize] * one;
+                        dump!("dst3", &dst[dst_ix..][..1]);
                         cache.flush_bits((lsb > 0) as usize);
                         dst_ix += 1;
                         leaf >>= 4;
@@ -547,9 +551,11 @@ fn l3_huffman(dst: &mut [f32], bs: &mut Bs, gr: &GrInfo, scf: &[f32], layer3gr_l
 
     'outer: loop {
         let mut leaf = codebook_count1[cache.peek_bits(4) as usize];
+        dump!("leaf", &[leaf as f32]);
         if (leaf & 8) == 0 {
-            let ix = (leaf >> 3) as u32 + cache.cache << 4 >> (32 - (leaf & 3));
+            let ix = (leaf >> 3) as u32 + (cache.cache << 4 >> (32 - (leaf & 3)));
             leaf = codebook_count1[ix as usize];
+            dump!("leaf2", &[leaf as f32]);
         }
         cache.flush_bits((leaf & 7) as usize);
         if cache.bspos() > layer3gr_limit {
@@ -574,6 +580,7 @@ fn l3_huffman(dst: &mut [f32], bs: &mut Bs, gr: &GrInfo, scf: &[f32], layer3gr_l
                 dst[dst_ix + j + 1] = if cache.peek_bit() { -one } else { one };
                 cache.flush_bits(1);
             }
+            dump!("dst4", &dst[dst_ix + j..][..2]);
         }
         cache.check_bits(bs);
         dst_ix += 4;
@@ -741,6 +748,7 @@ fn l3_antialias(grbuf: &mut [f32; 576], nbands: usize) {
 }
 
 fn l3_dct_9(y: &mut [f32; 9]) {
+    dump!("l3_dct_9_in", y);
     let mut s0 = y[0];
     let mut s2 = y[2];
     let mut s4 = y[4];
@@ -756,7 +764,7 @@ fn l3_dct_9(y: &mut [f32; 9]) {
     s2 = s0 - s4 * 0.5;
     y[4] = s4 + s0;
     s8 = t0 - t2 + s6;
-    s0 = t0 - t4 + s2;
+    s0 = t0 - t4 + t2;
     s4 = t0 + t4 - s6;
 
     let mut s1 = y[1];
@@ -781,6 +789,7 @@ fn l3_dct_9(y: &mut [f32; 9]) {
     y[6] = s0 + s3;
     y[7] = s2 - s1;
     y[8] = s4 + s7;
+    dump!("l3_dct_9_out", y);
 }
 
 fn l3_imdct36(grbuf: &mut [f32], overlap: &mut [f32], window: &[f32; 18], nbands: usize) {
@@ -826,7 +835,7 @@ fn l3_idct3(x0: f32, x1: f32, x2: f32) -> [f32; 3] {
 }
 
 fn l3_imdct12(x: &[f32], dst: &mut [f32], overlap: &mut [f32]) {
-    let co = l3_idct3(-x[0], x[6] + x[3], x[12] + x[0]);
+    let co = l3_idct3(-x[0], x[6] + x[3], x[12] + x[9]);
     let mut si = l3_idct3(x[15], x[12] - x[9], x[6] - x[3]);
     si[1] = -si[1];
     const G_TWID3: [f32; 6] = [
@@ -877,14 +886,17 @@ fn l3_imdct_gr(grbuf: &mut [f32; 576], overlap: &mut [f32], block_type: u8, n_lo
     ];
     if n_long_bands > 0 {
         l3_imdct36(grbuf, overlap, &G_MDCT_WINDOW[0], n_long_bands);
+        dump!("imdct36", grbuf);
     }
     let gr_slice = &mut grbuf[18 * n_long_bands..];
     let overlap_slice = &mut overlap[9 * n_long_bands..];
     if block_type == SHORT_BLOCK_TYPE {
         l3_imdct_short(gr_slice, overlap_slice, 32 - n_long_bands);
+        dump!("imdct_short", grbuf);
     } else {
         let window = &G_MDCT_WINDOW[(block_type == STOP_BLOCK_TYPE) as usize];
         l3_imdct36(gr_slice, overlap_slice, window, 32 - n_long_bands);
+        dump!("imdct36_b", grbuf);
     }
 }
 
@@ -1489,6 +1501,7 @@ fn mp3d_dct_ii(grbuf: &mut [f32; 576], n: usize) {
             t[2][i] = t3 + t2;
             t[3][i] = (t3 - t2) * G_SEC[3 * i + 2];
         }
+        dump!("t", t.as_flattened());
         for i in 0..4 {
             let mut x0 = t[i][0];
             let mut x1 = t[i][1];
@@ -1508,7 +1521,7 @@ fn mp3d_dct_ii(grbuf: &mut [f32; 576], n: usize) {
             x3 += x4;
             x4 = x0 - x3;
             x0 += x3;
-            x2 = x1 - x2;
+            x3 = x1 - x2;
             x1 += x2;
             t[i][0] = x0 + x1;
             t[i][4] = (x0 - x1) * 0.70710677;
@@ -1528,6 +1541,7 @@ fn mp3d_dct_ii(grbuf: &mut [f32; 576], n: usize) {
             t[i][6] = (x4 - x3) * 1.30656302;
             t[i][7] = (xt - x7) * 2.56291556;
         }
+        dump!("t2", t.as_flattened());
         for i in 0..7 {
             grbuf[(i * 4) * 18 + k] = t[0][i];
             grbuf[(i * 4 + 1) * 18 + k] = t[2][i] + t[3][i] + t[3][i + 1];
@@ -1629,7 +1643,7 @@ fn mp3d_synth(grbuf: &[[f32; 576]; 2], band: usize, dstl: &mut [Sample], nch: us
             let w0 = G_WIN[(14 - i) * 16 + k * 4];
             let w1 = G_WIN[(14 - i) * 16 + k * 4 + 1];
             let z_ix = ix - k * 2 * 64;
-            let y_ix = z_ix - (15 - k * 2) * 64;
+            let y_ix = ix - (15 - k * 2) * 64;
             for j in 0..4 {
                 b[j] += lins[z_ix + j] * w1 + lins[y_ix + j] * w0;
                 a[j] += lins[z_ix + j] * w0 - lins[y_ix + j] * w1;
@@ -1638,7 +1652,7 @@ fn mp3d_synth(grbuf: &[[f32; 576]; 2], band: usize, dstl: &mut [Sample], nch: us
             let w3 = G_WIN[(14 - i) * 16 + k * 4 + 3];
             for j in 0..4 {
                 b[j] += lins[z_ix - 64 + j] * w3 + lins[y_ix + 64 + j] * w2;
-                a[j] += lins[z_ix - 64 + j] * w3 - lins[y_ix + 64 + j] * w2;
+                a[j] += lins[y_ix + 64 + j] * w3 - lins[z_ix - 64 + j] * w2;
             }
         }
 
@@ -1662,7 +1676,9 @@ fn mp3d_synth_granule(
     lins: &mut [f32],
 ) {
     for gr in &mut grbuf[..nch] {
+        dump!("nbands", &[nbands as f32]);
         mp3d_dct_ii(gr, nbands);
+        dump!("dct_ii", gr);
     }
 
     lins[..15 * 64].copy_from_slice(qmf_state);

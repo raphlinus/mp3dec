@@ -3,6 +3,8 @@
 
 #![cfg_attr(all(not(feature = "dump"), not(test)), no_std)]
 #![forbid(unsafe_code)]
+// Constants are copied verbatim from minimp3.
+#![allow(clippy::excessive_precision)]
 
 mod bitstream;
 #[cfg(feature = "dump")]
@@ -593,11 +595,11 @@ fn l3_huffman(dst: &mut [f32], bs: &mut Bs, gr: &GrInfo, scf: &[f32], layer3gr_l
 }
 
 fn l3_midside_stereo(left_right: &mut [[f32; 576]; 2], ix: usize, n: usize) {
-    for i in ix..ix + n {
-        let a = left_right[0][i];
-        let b = left_right[1][i];
-        left_right[0][i] = a + b;
-        left_right[1][i] = a - b;
+    let [left, right] = left_right;
+    for (l, r) in left[ix..ix + n].iter_mut().zip(&mut right[ix..ix + n]) {
+        let (a, b) = (*l, *r);
+        *l = a + b;
+        *r = a - b;
     }
 }
 
@@ -608,10 +610,11 @@ fn l3_intensity_stereo_band(
     kl: f32,
     kr: f32,
 ) {
-    for i in ix..ix + n {
-        let a = left_right[0][i];
-        left_right[0][i] = a * kl;
-        left_right[1][i] = a * kr;
+    let [left, right] = left_right;
+    for (l, r) in left[ix..ix + n].iter_mut().zip(&mut right[ix..ix + n]) {
+        let a = *l;
+        *l = a * kl;
+        *r = a * kr;
     }
 }
 
@@ -659,7 +662,7 @@ fn l3_stereo_process(
         let ipos = ist_pos[i] as usize;
         if i as isize > max_band[i % 3] && ipos < max_pos {
             let s = if hdr.test_ms_stereo() {
-                1.41421356
+                core::f32::consts::SQRT_2
             } else {
                 1.0
             };
@@ -686,15 +689,15 @@ fn l3_intensity_stereo(
     let n_sfb = (gr[0].n_long_sfb + gr[0].n_short_sfb) as usize;
     let max_blocks = if gr[0].n_short_sfb > 0 { 3 } else { 1 };
 
-    let mut max_band = l3_stereo_top_band(&left_right[1], &gr[0].sfbtab, n_sfb);
+    let mut max_band = l3_stereo_top_band(&left_right[1], gr[0].sfbtab, n_sfb);
     if gr[0].n_long_sfb > 0 {
         max_band = [max_band[0].max(max_band[1]).max(max_band[2]); 3];
     }
     let default_pos = if header.test_mpeg1() { 3 } else { 0 };
-    for i in 0..max_blocks {
+    for (i, &band) in max_band[..max_blocks].iter().enumerate() {
         let itop = n_sfb - max_blocks + i;
         let prev = itop - max_blocks;
-        ist_pos[itop] = if max_band[i] >= prev as isize {
+        ist_pos[itop] = if band >= prev as isize {
             default_pos
         } else {
             ist_pos[prev]
@@ -703,7 +706,7 @@ fn l3_intensity_stereo(
     l3_stereo_process(
         left_right,
         ist_pos,
-        &gr[0].sfbtab,
+        gr[0].sfbtab,
         header,
         max_band,
         gr[1].scalefac_compress & 1,
@@ -904,6 +907,12 @@ fn l3_imdct_gr(grbuf: &mut [f32; 576], overlap: &mut [f32], block_type: u8, n_lo
     }
 }
 
+impl Default for Decoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Decoder {
     pub fn new() -> Self {
         Decoder {
@@ -1026,7 +1035,7 @@ impl Decoder {
             success as usize * self.header.frame_samples()
         } else {
             // optional TODO: implement level 1 & 2
-            return 0;
+            0
         }
     }
 
@@ -1512,15 +1521,15 @@ fn mp3d_dct_ii(grbuf: &mut [f32; 576], n: usize) {
             t[3][i] = (t3 - t2) * G_SEC[3 * i + 2];
         }
         dump!("t", t.as_flattened());
-        for i in 0..4 {
-            let mut x0 = t[i][0];
-            let mut x1 = t[i][1];
-            let mut x2 = t[i][2];
-            let mut x3 = t[i][3];
-            let mut x4 = t[i][4];
-            let mut x5 = t[i][5];
-            let mut x6 = t[i][6];
-            let mut x7 = t[i][7];
+        for ti in &mut t {
+            let mut x0 = ti[0];
+            let mut x1 = ti[1];
+            let mut x2 = ti[2];
+            let mut x3 = ti[3];
+            let mut x4 = ti[4];
+            let mut x5 = ti[5];
+            let mut x6 = ti[6];
+            let mut x7 = ti[7];
             let mut xt = x0 - x7;
             x0 += x7;
             x7 = x1 - x6;
@@ -1533,8 +1542,8 @@ fn mp3d_dct_ii(grbuf: &mut [f32; 576], n: usize) {
             x0 += x3;
             x3 = x1 - x2;
             x1 += x2;
-            t[i][0] = x0 + x1;
-            t[i][4] = (x0 - x1) * 0.70710677;
+            ti[0] = x0 + x1;
+            ti[4] = (x0 - x1) * 0.70710677;
             x5 += x6;
             x6 = (x6 + x7) * 0.70710677;
             x7 += xt;
@@ -1544,12 +1553,12 @@ fn mp3d_dct_ii(grbuf: &mut [f32; 576], n: usize) {
             x5 -= x7 * 0.198912367;
             x0 = xt - x6;
             xt += x6;
-            t[i][1] = (xt + x7) * 0.50979561;
-            t[i][2] = (x4 + x3) * 0.54119611;
-            t[i][3] = (x0 - x5) * 0.60134488;
-            t[i][5] = (x0 + x5) * 0.89997619;
-            t[i][6] = (x4 - x3) * 1.30656302;
-            t[i][7] = (xt - x7) * 2.56291556;
+            ti[1] = (xt + x7) * 0.50979561;
+            ti[2] = (x4 + x3) * 0.54119611;
+            ti[3] = (x0 - x5) * 0.60134488;
+            ti[5] = (x0 + x5) * 0.89997619;
+            ti[6] = (x4 - x3) * 1.30656302;
+            ti[7] = (xt - x7) * 2.56291556;
         }
         dump!("t2", t.as_flattened());
         for i in 0..7 {
@@ -1572,6 +1581,7 @@ fn mp3d_scale_pcm(sample: f32) -> Sample {
     (y as i16) - (y < 0.) as i16
 }
 
+#[allow(clippy::identity_op, clippy::erasing_op)]
 fn mp3d_synth_pair(pcm: &mut [Sample], nch: usize, z: &[f32]) {
     let mut a = (z[14 * 64] - z[0]) * 29.;
     a += (z[1 * 64] + z[13 * 64]) * 213.;

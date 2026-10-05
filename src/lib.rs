@@ -1,6 +1,27 @@
 // Copyright 2025 Raph Levien
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+//! MP3 (MPEG-1/2/2.5 Layer III) decoder, ported from [minimp3].
+//!
+//! ```
+//! # let mp3: &[u8] = &[];
+//! let mut decoder = mp3dec::Decoder::new();
+//! let mut info = mp3dec::FrameInfo::default();
+//! let mut pcm = [0i16; mp3dec::MAX_SAMPLES_PER_FRAME];
+//! let mut offset = 0;
+//! while offset < mp3.len() {
+//!     let n = decoder.decode_frame(&mp3[offset..], Some(&mut pcm), &mut info);
+//!     let samples = &pcm[..n * info.channels];
+//!     // ...
+//!     offset += info.frame_bytes;
+//! }
+//! ```
+//!
+//! Each `decode_frame` call uses about 16 KB of stack for scratch buffers.
+//! `Decoder` itself is about 6.5 KB.
+//!
+//! [minimp3]: https://github.com/lieff/minimp3
+
 #![cfg_attr(all(not(feature = "dump"), not(test)), no_std)]
 #![forbid(unsafe_code)]
 // Constants are copied verbatim from minimp3.
@@ -25,18 +46,27 @@ macro_rules! dump {
 
 use bitstream::{Bs, BsCache, BsCore};
 
-const MAX_SAMPLES_PER_FRAME: usize = 1152 * 2;
+/// Size of the `pcm` buffer: max samples per frame, all channels (1152 × 2).
+pub const MAX_SAMPLES_PER_FRAME: usize = 1152 * 2;
 
+/// Information about the most recent frame.
 #[derive(Default)]
+#[non_exhaustive]
 pub struct FrameInfo {
+    /// Bytes consumed, including any skipped junk; advance input by this.
     pub frame_bytes: usize,
+    /// Offset of the frame header within the input.
     pub frame_offset: usize,
+    /// 1 or 2.
     pub channels: usize,
+    /// Sample rate.
     pub hz: usize,
+    /// MPEG layer (1-3); only layer 3 is decoded.
     pub layer: usize,
     pub bitrate_kbps: usize,
 }
 
+/// Decoder state, carried between frames.
 pub struct Decoder {
     mdct_overlap: [[f32; 9 * 32]; 2],
     qmf_state: [f32; 15 * 2 * 32],
@@ -46,8 +76,9 @@ pub struct Decoder {
     reserv_buf: [u8; 511],
 }
 
+/// Output PCM sample: signed 16-bit.
 // consider float output also
-type Sample = i16;
+pub type Sample = i16;
 
 const MAX_FREE_FORMAT_FRAME_SIZE: usize = 2304;
 // Note: this is configurable
@@ -954,9 +985,13 @@ impl Decoder {
         self.reserv >= main_data_begin
     }
 
-    /// Decode one frame.
+    /// Decode one frame from the start of `mp3`, skipping any leading junk.
     ///
-    /// Return value is the number of samples decoded.
+    /// Returns samples per channel; output is interleaved. Returns 0 if no
+    /// frame was decoded (no sync, layer 1/2, or bit reservoir not yet
+    /// filled, as after a seek); advance by `info.frame_bytes` regardless.
+    ///
+    /// With `pcm` set to `None`, only the header is parsed.
     pub fn decode_frame(
         &mut self,
         mp3: &[u8],

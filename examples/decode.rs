@@ -1,3 +1,6 @@
+// Copyright 2025 Raph Levien
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 use clap::Parser;
 use mp3dec::{Decoder, FrameInfo};
 

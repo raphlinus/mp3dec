@@ -8,6 +8,7 @@ keywords = ["mp3", "audio", "decoder", "mpeg", "media"]
 categories = ["multimedia", "multimedia::audio", "no-std"]
 repository = "https://github.com/raphlinus/mp3dec"
 rust-version = "1.85"
+exclude = ["compare.py"]
 
 [dev-dependencies]
 clap = { version = "4.6.1", features = ["derive"] }

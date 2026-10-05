@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 #![cfg_attr(all(not(feature = "dump"), not(test)), no_std)]
+#![forbid(unsafe_code)]
 
 mod bitstream;
 #[cfg(feature = "dump")]
@@ -1100,12 +1101,12 @@ impl Default for Scratch {
     fn default() -> Self {
         Scratch {
             bs: Default::default(),
-            maindata: [0; _],
+            maindata: [0; MAX_BITRESERVOIR_BYTES + MAX_L3_FRAME_PAYLOAD_BYTES],
             gr_info: Default::default(),
             grbuf: [[0.0; 576]; 2],
-            scf: [0.0; _],
-            syn: [0.0; _],
-            ist_pos: [[0; _]; _],
+            scf: [0.0; 40],
+            syn: [0.0; 2 * 32 * (18 + 15)],
+            ist_pos: [[0; 39]; 2],
         }
     }
 }

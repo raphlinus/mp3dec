@@ -3,6 +3,11 @@ name = "mp3dec"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
+description = "mp3 decoder written in safe Rust, ported from minimp3"
+keywords = ["mp3", "audio", "decoder", "mpeg", "media"]
+categories = ["multimedia", "multimedia::audio", "no-std"]
+repository = "https://github.com/raphlinus/mp3dec"
+rust-version = "1.85"
 
 [dev-dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
@@ -10,5 +15,3 @@ hound = "3.5.1"
 
 [features]
 dump = []
-
-[dependencies]

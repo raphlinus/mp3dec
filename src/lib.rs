@@ -611,14 +611,14 @@ fn l3_intensity_stereo_band(
     }
 }
 
-fn l3_stereo_top_band(right: &[f32; 576], sfb: &[u8], nbands: usize) -> [usize; 3] {
-    let mut max_band = [!0; 3];
+fn l3_stereo_top_band(right: &[f32; 576], sfb: &[u8], nbands: usize) -> [isize; 3] {
+    let mut max_band = [-1; 3];
     let mut ix = 0;
     for i in 0..nbands {
         for k in (0..sfb[i]).step_by(2) {
             let base = ix + k as usize;
             if right[base] != 0.0 || right[base + 1] != 0.0 {
-                max_band[i % 3] = i;
+                max_band[i % 3] = i as isize;
                 break;
             }
         }
@@ -632,7 +632,7 @@ fn l3_stereo_process(
     ist_pos: &[u8],
     sfb: &[u8],
     hdr: Header,
-    max_band: [usize; 3],
+    max_band: [isize; 3],
     mpeg2_sh: u16,
 ) {
     const G_PAN: [(f32, f32); 7] = [
@@ -653,7 +653,7 @@ fn l3_stereo_process(
             break;
         }
         let ipos = ist_pos[i] as usize;
-        if i > max_band[i % 3] && ipos < max_pos {
+        if i as isize > max_band[i % 3] && ipos < max_pos {
             let s = if hdr.test_ms_stereo() {
                 1.41421356
             } else {
@@ -690,7 +690,7 @@ fn l3_intensity_stereo(
     for i in 0..max_blocks {
         let itop = n_sfb - max_blocks + i;
         let prev = itop - max_blocks;
-        ist_pos[itop] = if max_band[i] >= prev {
+        ist_pos[itop] = if max_band[i] >= prev as isize {
             default_pos
         } else {
             ist_pos[prev]
@@ -986,7 +986,10 @@ impl Decoder {
         let Some(pcm) = pcm else {
             return header.frame_samples();
         };
-        let bs_buf = &mp3[i..][..frame_size][HDR_SIZE..];
+        let Some(bs_buf) = mp3[i..][..frame_size].get(HDR_SIZE..) else {
+            self.header.0[0] = 0;
+            return 0;
+        };
         let mut bs_core = BsCore::new(bs_buf.len());
         let mut bs_frame = Bs::new(bs_buf, &mut bs_core);
         if header.is_crc() {
@@ -1122,14 +1125,14 @@ fn mp3d_match_frame(mp3: &[u8], frame_bytes: usize) -> bool {
 
 /// Returns offset of frame start and frame_bytes
 fn mp3d_find_frame(mp3: &[u8], free_format_bytes: &mut usize) -> (usize, usize) {
-    for i in 0..mp3.len() - HDR_SIZE {
+    for i in 0..mp3.len().saturating_sub(HDR_SIZE) {
         let header = Header::new(&mp3[i..]);
         if header.is_valid() {
             let mut frame_bytes = header.frame_bytes(*free_format_bytes);
             let mut frame_and_padding = frame_bytes + header.padding();
             if frame_bytes == 0 {
                 for k in HDR_SIZE..MAX_FREE_FORMAT_FRAME_SIZE {
-                    if i + 2 * k < mp3.len() - HDR_SIZE {
+                    if i + 2 * k >= mp3.len() - HDR_SIZE {
                         break;
                     }
                     let other = Header::new(&mp3[i + k..]);
@@ -1228,9 +1231,12 @@ const G_SCF_MIXED: [[u8; 40]; 8] = [
         6, 6, 6, 6, 6, 6, 6, 6, 6, 8, 8, 8, 10, 10, 10, 12, 12, 12, 14, 14, 14, 18, 18, 18, 24, 24,
         24, 30, 30, 30, 40, 40, 40, 18, 18, 18, 0, 0, 0, 0,
     ],
+    // MPEG-2.5 8 kHz: 6 long bands (72 lines), then short bands 3..12.
+    // (minimp3 and libmad use a 36-line split here, which doesn't match
+    // n_long_bands or the scalefactor partitions.)
     [
-        12, 12, 12, 4, 4, 4, 8, 8, 8, 12, 12, 12, 16, 16, 16, 20, 20, 20, 24, 24, 24, 28, 28, 28,
-        36, 36, 36, 2, 2, 2, 2, 2, 2, 2, 2, 2, 26, 26, 26, 0,
+        12, 12, 12, 12, 12, 12, 12, 12, 12, 16, 16, 16, 20, 20, 20, 24, 24, 24, 28, 28, 28, 36,
+        36, 36, 2, 2, 2, 2, 2, 2, 2, 2, 2, 26, 26, 26, 0, 0, 0, 0,
     ],
     [
         6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 8, 8, 8, 10, 10, 10, 14, 14, 14, 18, 18, 18, 26, 26,
@@ -1697,5 +1703,29 @@ fn mp3d_synth_granule(
         }
     } else {
         qmf_state.copy_from_slice(&lins[nbands * 64..][..15 * 64]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sfb_tables_cover_granule() {
+        for sr_idx in 0..8 {
+            let sum = |t: &[u8]| t.iter().map(|&x| x as usize).sum::<usize>();
+            assert_eq!(sum(&G_SCF_LONG[sr_idx]), 576);
+            assert_eq!(sum(&G_SCF_SHORT[sr_idx]), 576);
+            let mixed = &G_SCF_MIXED[sr_idx];
+            // Matches n_long_sfb and n_long_bands in l3_read_side_info / l3_decode.
+            let (n_long_sfb, n_long_bands) = match sr_idx {
+                5.. => (8, 2),
+                1 => (6, 4),
+                _ => (6, 2),
+            };
+            assert_eq!(sum(&mixed[..n_long_sfb]), 18 * n_long_bands);
+            assert_eq!(sum(mixed), 576);
+            assert_eq!(mixed[n_long_sfb + 30], 0);
+        }
     }
 }
